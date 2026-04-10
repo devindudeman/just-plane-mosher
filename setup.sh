@@ -17,7 +17,7 @@ fi
 sudo apt-get update
 sudo apt-get install -y \
     python3-pip python3-venv \
-    libopenjp2-7 libtiff6 libfreetype6 libfreetype6-dev \
+    libopenjp2-7 libtiff6 libfreetype6 libfreetype6-dev libopenblas0 \
     fonts-dejavu-core
 
 # Python venv
