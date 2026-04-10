@@ -12,22 +12,43 @@ from src.geo import MapBounds, compute_map_bounds, tile_coords_fractional
 logger = logging.getLogger("mosher.tiles")
 
 TILE_SIZE = 256
-TILE_URL = "https://tiles.stadiamaps.com/tiles/stamen_watercolor/{z}/{x}/{y}.jpg"
-TILE_MAX_AGE_DAYS = 3650  # ~10 years — watercolor tiles never change
-FALLBACK_COLOR = (245, 235, 220)  # Warm beige — blends with watercolor
+TILE_MAX_AGE_DAYS = 3650  # ~10 years — tiles never change
+
+MAP_STYLES = {
+    "watercolor": {
+        "url": "https://tiles.stadiamaps.com/tiles/stamen_watercolor/{z}/{x}/{y}.jpg",
+        "ext": "jpg",
+        "fallback": (245, 235, 220),  # Warm beige
+    },
+    "toner": {
+        "url": "https://tiles.stadiamaps.com/tiles/stamen_toner/{z}/{x}/{y}.png",
+        "ext": "png",
+        "fallback": (255, 255, 255),  # White
+    },
+    "terrain": {
+        "url": "https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}.png",
+        "ext": "png",
+        "fallback": (240, 238, 230),  # Light grey-green
+    },
+}
+
+STYLE_ORDER = ["watercolor", "toner", "terrain"]
 
 
 class TileCache:
     def __init__(self, config: Config):
         self._config = config
-        self._tile_dir = Path(config.cache_dir) / "tiles"
-        self._tile_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_dir = Path(config.cache_dir)
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._session = requests.Session()
         self._session.headers["User-Agent"] = "JustPlaneMosher/1.0"
 
-    def get_tile(self, z: int, x: int, y: int) -> Image.Image:
+    def get_tile(self, z: int, x: int, y: int, style: str = "watercolor") -> Image.Image:
         """Fetch a single map tile, using disk cache."""
-        cache_path = self._tile_dir / f"{z}_{x}_{y}.jpg"
+        style_info = MAP_STYLES[style]
+        tile_dir = self._cache_dir / "tiles" / style
+        tile_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = tile_dir / f"{z}_{x}_{y}.{style_info['ext']}"
 
         # Check disk cache
         if cache_path.exists():
@@ -36,10 +57,10 @@ class TileCache:
                 try:
                     return Image.open(cache_path).convert("RGB")
                 except Exception:
-                    pass  # Re-fetch if corrupt
+                    pass
 
         # Fetch from Stadia Maps
-        url = TILE_URL.format(z=z, x=x, y=y)
+        url = style_info["url"].format(z=z, x=x, y=y)
         if self._config.stadia_api_key:
             url += f"?api_key={self._config.stadia_api_key}"
 
@@ -47,59 +68,51 @@ class TileCache:
             resp = self._session.get(url, timeout=15)
             resp.raise_for_status()
             cache_path.write_bytes(resp.content)
-            logger.info("Fetched tile z=%d x=%d y=%d", z, x, y)
+            logger.info("Fetched %s tile z=%d x=%d y=%d", style, z, x, y)
             return Image.open(cache_path).convert("RGB")
         except Exception as e:
-            logger.warning("Failed to fetch tile z=%d x=%d y=%d: %s", z, x, y, e)
-            # Return a solid fallback tile
-            return Image.new("RGB", (TILE_SIZE, TILE_SIZE), FALLBACK_COLOR)
+            logger.warning("Failed to fetch %s tile z=%d x=%d y=%d: %s", style, z, x, y, e)
+            return Image.new("RGB", (TILE_SIZE, TILE_SIZE), style_info["fallback"])
 
-    def build_base_map(self, config: Config) -> tuple[Image.Image, MapBounds]:
+    def build_base_map(self, config: Config, style: str = "watercolor") -> tuple[Image.Image, MapBounds]:
         """Stitch tiles into an 800x480 base map centered on configured location."""
         zoom = config.map_zoom
         width = config.display_width
         height = config.display_height
 
-        # Fractional tile coordinates of center point
         cx, cy = tile_coords_fractional(config.latitude, config.longitude, zoom)
 
-        # Pixel offset of center within the tile grid
         center_px_x = cx * TILE_SIZE
         center_px_y = cy * TILE_SIZE
 
-        # Top-left pixel of the output viewport in the global tile pixel space
         origin_px_x = center_px_x - width / 2.0
         origin_px_y = center_px_y - height / 2.0
 
-        # Which tiles we need
         tile_x_start = int(math.floor(origin_px_x / TILE_SIZE))
         tile_x_end = int(math.floor((origin_px_x + width) / TILE_SIZE))
         tile_y_start = int(math.floor(origin_px_y / TILE_SIZE))
         tile_y_end = int(math.floor((origin_px_y + height) / TILE_SIZE))
 
-        # Create a canvas large enough for all tiles
+        fallback = MAP_STYLES[style]["fallback"]
         canvas_w = (tile_x_end - tile_x_start + 1) * TILE_SIZE
         canvas_h = (tile_y_end - tile_y_start + 1) * TILE_SIZE
-        canvas = Image.new("RGB", (canvas_w, canvas_h), FALLBACK_COLOR)
+        canvas = Image.new("RGB", (canvas_w, canvas_h), fallback)
 
-        # Paste tiles onto canvas
         for tx in range(tile_x_start, tile_x_end + 1):
             for ty in range(tile_y_start, tile_y_end + 1):
-                tile = self.get_tile(zoom, tx, ty)
+                tile = self.get_tile(zoom, tx, ty, style)
                 paste_x = (tx - tile_x_start) * TILE_SIZE
                 paste_y = (ty - tile_y_start) * TILE_SIZE
                 canvas.paste(tile, (paste_x, paste_y))
 
-        # Crop to the exact 800x480 viewport
         crop_x = int(origin_px_x - tile_x_start * TILE_SIZE)
         crop_y = int(origin_px_y - tile_y_start * TILE_SIZE)
         base_map = canvas.crop((crop_x, crop_y, crop_x + width, crop_y + height))
 
-        # Compute geographic bounds of the cropped image
         bounds = compute_map_bounds(config.latitude, config.longitude, zoom, width, height)
         logger.info(
-            "Base map built: %dx%d, bounds N=%.4f S=%.4f E=%.4f W=%.4f",
-            width, height, bounds.north, bounds.south, bounds.east, bounds.west,
+            "Base map built (%s): %dx%d, bounds N=%.4f S=%.4f E=%.4f W=%.4f",
+            style, width, height, bounds.north, bounds.south, bounds.east, bounds.west,
         )
 
         return base_map, bounds

@@ -121,9 +121,11 @@ class _LabelInfo:
 
 
 class FlightRenderer:
-    def __init__(self, config: Config, tile_cache: TileCache):
+    def __init__(self, config: Config, tile_cache: TileCache, style: str = "watercolor"):
         self._config = config
-        self._base_map, self._map_bounds = tile_cache.build_base_map(config)
+        self._tile_cache = tile_cache
+        self._style = style
+        self._base_map, self._map_bounds = tile_cache.build_base_map(config, style)
         self._size = (config.display_width, config.display_height)
 
         # Fonts — sized for legibility on e-ink
@@ -132,6 +134,16 @@ class FlightRenderer:
         self._font_info = _load_font(16, bold=True)
         self._font_title = _load_font(17, bold=True)
         self._font_tiny = _load_font(12, bold=True)
+
+    def set_style(self, style: str) -> None:
+        """Switch the map style and rebuild the base map."""
+        self._style = style
+        self._base_map, self._map_bounds = self._tile_cache.build_base_map(self._config, style)
+        logger.info("Switched map style to %s", style)
+
+    @property
+    def style(self) -> str:
+        return self._style
 
     def render(self, flights: list[TrackedFlight]) -> Image.Image:
         """Render the complete flight tracker frame.
