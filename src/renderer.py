@@ -32,12 +32,13 @@ PAL_YELLOW = 5
 PAL_ORANGE = 6
 
 # RGB colors for drawing on the pre-quantization map layer (aircraft arrows)
+# These are deliberately dark/saturated so they survive dithering and pop against the map
 RGB_BLACK = (0, 0, 0)
-RGB_RED = (220, 40, 40)
-RGB_ORANGE = (230, 130, 30)
-RGB_YELLOW = (230, 210, 40)
-RGB_BLUE = (40, 40, 180)
-RGB_GREEN = (30, 120, 50)
+RGB_RED = (180, 0, 0)
+RGB_ORANGE = (200, 80, 0)
+RGB_YELLOW = (180, 160, 0)
+RGB_BLUE = (20, 20, 140)
+RGB_GREEN = (0, 80, 20)
 
 # Font paths to try
 FONT_PATHS = [
@@ -128,8 +129,8 @@ class FlightRenderer:
         # Fonts — sized for legibility on e-ink
         self._font_label = _load_font(16, bold=True)
         self._font_route = _load_font(14)
-        self._font_info = _load_font(15)
-        self._font_title = _load_font(16, bold=True)
+        self._font_info = _load_font(16, bold=True)
+        self._font_title = _load_font(17, bold=True)
         self._font_tiny = _load_font(12, bold=True)
 
     def render(self, flights: list[TrackedFlight]) -> Image.Image:
