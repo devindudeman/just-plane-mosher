@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/just-plane-mosher
-ExecStart=/home/pi/just-plane-mosher/venv/bin/python -m src.main
+User=devinbernosky
+WorkingDirectory=/home/devinbernosky/just-plane-mosher
+ExecStart=/home/devinbernosky/just-plane-mosher/venv/bin/python -m src.main
 Restart=always
 RestartSec=30
 Environment=PYTHONUNBUFFERED=1
