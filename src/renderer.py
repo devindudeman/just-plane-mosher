@@ -5,7 +5,7 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from src.config import Config
-from src.geo import MapBounds, latlon_to_pixel, haversine, latlon_to_pixel, compute_map_bounds
+from src.geo import latlon_to_pixel
 from src.map_tiles import TileCache
 from src.models import TrackedFlight
 
@@ -22,22 +22,27 @@ PALETTE_RGB = [
     (177, 106, 73),     # 6: Orange
 ]
 
-# Pure colors for drawing (pre-quantization, these map well to the palette)
-BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
-RED = (220, 40, 40)
-ORANGE = (230, 130, 30)
-YELLOW = (230, 210, 40)
-BLUE = (40, 40, 180)
-GREEN = (30, 120, 50)
+# Palette indices for drawing on quantized "P" mode images
+PAL_BLACK = 0
+PAL_WHITE = 1
+PAL_GREEN = 2
+PAL_BLUE = 3
+PAL_RED = 4
+PAL_YELLOW = 5
+PAL_ORANGE = 6
+
+# RGB colors for drawing on the pre-quantization map layer (aircraft arrows)
+RGB_BLACK = (0, 0, 0)
+RGB_RED = (220, 40, 40)
+RGB_ORANGE = (230, 130, 30)
+RGB_YELLOW = (230, 210, 40)
+RGB_BLUE = (40, 40, 180)
+RGB_GREEN = (30, 120, 50)
 
 # Font paths to try
 FONT_PATHS = [
     "assets/fonts/DejaVuSans.ttf",
-    "assets/fonts/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/nix/store/*/share/fonts/truetype/DejaVuSans.ttf",
 ]
 
 BOLD_FONT_PATHS = [
@@ -53,34 +58,44 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageF
             return ImageFont.truetype(path, size)
         except (OSError, IOError):
             continue
-    # Try system font discovery
     try:
         return ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
     except (OSError, IOError):
         return ImageFont.load_default()
 
 
-def _altitude_color(alt_ft: int | None) -> tuple[int, int, int]:
-    """Map altitude to a color that will quantize well to the 7-color palette."""
+def _altitude_color_rgb(alt_ft: int | None) -> tuple[int, int, int]:
+    """Map altitude to an RGB color for the map layer (pre-quantization)."""
     if alt_ft is None:
-        return GREEN
+        return RGB_GREEN
     if alt_ft < 5000:
-        return RED
+        return RGB_RED
     if alt_ft < 15000:
-        return ORANGE
+        return RGB_ORANGE
     if alt_ft < 30000:
-        return YELLOW
-    return BLUE
+        return RGB_YELLOW
+    return RGB_BLUE
+
+
+def _altitude_color_pal(alt_ft: int | None) -> int:
+    """Map altitude to a palette index for the quantized layer."""
+    if alt_ft is None:
+        return PAL_GREEN
+    if alt_ft < 5000:
+        return PAL_RED
+    if alt_ft < 15000:
+        return PAL_ORANGE
+    if alt_ft < 30000:
+        return PAL_YELLOW
+    return PAL_BLUE
 
 
 def _arrow_points(
     cx: float, cy: float, heading_deg: float, size: float = 12
 ) -> list[tuple[float, float]]:
     """Compute vertices of a triangle arrow pointing in the heading direction."""
-    angle = math.radians(heading_deg - 90)  # 0° = north = up on screen
-    # Tip
+    angle = math.radians(heading_deg - 90)
     tip = (cx + size * math.cos(angle), cy + size * math.sin(angle))
-    # Two base points, spread 140° from tip direction
     left_angle = angle + math.radians(140)
     right_angle = angle - math.radians(140)
     base = size * 0.5
@@ -89,99 +104,136 @@ def _arrow_points(
     return [tip, left, right]
 
 
+# Label data collected during RGB pass, drawn on palette image after quantization
+class _LabelInfo:
+    __slots__ = ("x", "y", "line1", "line2", "text_w", "total_h", "text_h", "box")
+
+    def __init__(self, x, y, line1, line2, text_w, total_h, text_h, box):
+        self.x = x
+        self.y = y
+        self.line1 = line1
+        self.line2 = line2
+        self.text_w = text_w
+        self.total_h = total_h
+        self.text_h = text_h
+        self.box = box
+
+
 class FlightRenderer:
     def __init__(self, config: Config, tile_cache: TileCache):
         self._config = config
         self._base_map, self._map_bounds = tile_cache.build_base_map(config)
         self._size = (config.display_width, config.display_height)
 
-        # Load fonts — sized for legibility after 7-color dithering
-        self._font_label = _load_font(15, bold=True)
-        self._font_route = _load_font(13)
-        self._font_info = _load_font(14)
-        self._font_title = _load_font(15, bold=True)
-        self._font_tiny = _load_font(10)
+        # Fonts — sized for legibility on e-ink
+        self._font_label = _load_font(16, bold=True)
+        self._font_route = _load_font(14)
+        self._font_info = _load_font(15)
+        self._font_title = _load_font(16, bold=True)
+        self._font_tiny = _load_font(12, bold=True)
 
     def render(self, flights: list[TrackedFlight]) -> Image.Image:
-        """Render the complete flight tracker frame."""
+        """Render the complete flight tracker frame.
+
+        Two-layer approach:
+        1. Draw map + aircraft arrows on RGB canvas, then dither to 7 colors
+        2. Draw all text/UI on the palette image with exact palette indices (no dithering)
+        """
+        # === Layer 1: RGB map + aircraft arrows (will be dithered) ===
         frame = self._base_map.copy()
         draw = ImageDraw.Draw(frame)
 
-        # Draw range ring
         self._draw_range_ring(draw)
 
-        # Draw aircraft (count visible ones for info bar)
+        # Draw aircraft arrows and collect label positions
+        labels: list[_LabelInfo] = []
         label_boxes: list[tuple[int, int, int, int]] = []
         visible_count = 0
+
         for flight in flights:
-            pixel = latlon_to_pixel(
-                flight.aircraft.lat, flight.aircraft.lon, self._map_bounds, self._size
+            ac = flight.aircraft
+            pixel = latlon_to_pixel(ac.lat, ac.lon, self._map_bounds, self._size)
+            if pixel is None:
+                continue
+
+            visible_count += 1
+            px, py = pixel
+            color = _altitude_color_rgb(ac.altitude_ft)
+
+            # Draw arrow on RGB canvas (survives dithering as a colored blob)
+            if ac.track_deg is not None:
+                points = _arrow_points(px, py, ac.track_deg, size=14)
+                shadow = [(x + 1, y + 1) for x, y in points]
+                draw.polygon(shadow, fill=RGB_BLACK)
+                draw.polygon(points, fill=color, outline=RGB_BLACK, width=2)
+            else:
+                draw.ellipse((px - 6, py - 6, px + 6, py + 6), fill=color, outline=RGB_BLACK, width=2)
+
+            # Collect label info (text drawn AFTER quantization)
+            label = self._compute_label(draw, flight, px, py, label_boxes)
+            if label:
+                labels.append(label)
+
+        # === Quantize the map layer ===
+        quantized = self._quantize(frame)
+
+        # === Layer 2: Draw crisp text on the palette image ===
+        draw_p = ImageDraw.Draw(quantized)
+
+        # Flight labels
+        for label in labels:
+            pad = 3
+            draw_p.rectangle(
+                (label.x - pad, label.y - pad,
+                 label.x + label.text_w + pad, label.y + label.total_h + pad),
+                fill=PAL_WHITE,
             )
-            if pixel is not None:
-                visible_count += 1
-            self._draw_flight(draw, flight, label_boxes)
+            draw_p.text((label.x, label.y), label.line1, fill=PAL_BLACK, font=self._font_label)
+            if label.line2:
+                draw_p.text(
+                    (label.x, label.y + label.text_h + 1),
+                    label.line2, fill=PAL_BLACK, font=self._font_route,
+                )
 
-        # Draw info bar
-        self._draw_info_bar(draw, visible_count)
+        # UI elements
+        self._draw_info_bar_p(draw_p, visible_count)
+        self._draw_compass_rose_p(draw_p)
+        self._draw_legend_p(draw_p)
 
-        # Draw compass rose
-        self._draw_compass_rose(draw)
+        return quantized
 
-        # Draw altitude legend
-        self._draw_legend(draw)
-
-        # Quantize to 7-color palette
-        return self._quantize(frame)
-
-    def _draw_flight(
+    def _compute_label(
         self,
         draw: ImageDraw.ImageDraw,
         flight: TrackedFlight,
+        px: int,
+        py: int,
         label_boxes: list[tuple[int, int, int, int]],
-    ) -> None:
+    ) -> _LabelInfo | None:
+        """Compute label position and text without drawing. Returns label info."""
         ac = flight.aircraft
-        pixel = latlon_to_pixel(ac.lat, ac.lon, self._map_bounds, self._size)
-        if pixel is None:
-            return
-
-        px, py = pixel
-        color = _altitude_color(ac.altitude_ft)
-
-        # Draw aircraft arrow — large and bold to survive dithering
-        if ac.track_deg is not None:
-            points = _arrow_points(px, py, ac.track_deg, size=14)
-            # Draw a black shadow first for contrast
-            shadow = [(x + 1, y + 1) for x, y in points]
-            draw.polygon(shadow, fill=BLACK)
-            draw.polygon(points, fill=color, outline=BLACK, width=2)
-        else:
-            draw.ellipse((px - 6, py - 6, px + 6, py + 6), fill=color, outline=BLACK, width=2)
-
-        # Build label text
-        label_line1 = ac.callsign or ac.registration or ac.hex[:6]
-        label_line2 = None
+        line1 = ac.callsign or ac.registration or ac.hex[:6]
+        line2 = None
         if flight.info and flight.info.origin_iata and flight.info.destination_iata:
-            label_line2 = f"{flight.info.origin_iata}>{flight.info.destination_iata}"
+            line2 = f"{flight.info.origin_iata}>{flight.info.destination_iata}"
 
-        # Position label
-        label_x = px + 12
+        label_x = px + 14
         label_y = py - 8
 
-        # Measure text
-        bbox1 = draw.textbbox((0, 0), label_line1, font=self._font_label)
+        bbox1 = draw.textbbox((0, 0), line1, font=self._font_label)
         text_w = bbox1[2] - bbox1[0]
         text_h = bbox1[3] - bbox1[1]
         total_h = text_h
-        if label_line2:
-            bbox2 = draw.textbbox((0, 0), label_line2, font=self._font_route)
+        if line2:
+            bbox2 = draw.textbbox((0, 0), line2, font=self._font_route)
             text_w = max(text_w, bbox2[2] - bbox2[0])
             total_h += (bbox2[3] - bbox2[1]) + 1
 
-        # Flip label to left side if it would go off-screen
+        # Flip to left if off-screen
         if label_x + text_w + 6 > self._size[0]:
-            label_x = px - text_w - 18
+            label_x = px - text_w - 20
 
-        # Collision avoidance: shift down if overlapping another label
+        # Collision avoidance
         pad = 3
         box = (label_x - pad, label_y - pad, label_x + text_w + pad, label_y + total_h + pad)
         for existing in label_boxes:
@@ -191,20 +243,10 @@ class FlightRenderer:
 
         label_boxes.append(box)
 
-        # Draw label background pill
-        draw.rounded_rectangle(
-            (label_x - pad, label_y - pad, label_x + text_w + pad, label_y + total_h + pad),
-            radius=3,
-            fill=(255, 255, 255, 220),
-            outline=None,
+        return _LabelInfo(
+            x=label_x, y=label_y, line1=line1, line2=line2,
+            text_w=text_w, total_h=total_h, text_h=text_h, box=box,
         )
-
-        # Draw text
-        draw.text((label_x, label_y), label_line1, fill=BLACK, font=self._font_label)
-        if label_line2:
-            draw.text(
-                (label_x, label_y + text_h + 1), label_line2, fill=BLACK, font=self._font_route
-            )
 
     def _draw_range_ring(self, draw: ImageDraw.ImageDraw) -> None:
         """Draw a subtle 10nm range ring centered on the configured location."""
@@ -215,9 +257,7 @@ class FlightRenderer:
             return
 
         cx, cy = center
-
-        # Calculate 10nm radius in pixels by projecting a point 10nm north
-        north_lat = self._config.latitude + (10.0 / 60.0)  # ~10nm north
+        north_lat = self._config.latitude + (10.0 / 60.0)
         north_pixel = latlon_to_pixel(
             north_lat, self._config.longitude, self._map_bounds, self._size
         )
@@ -226,106 +266,91 @@ class FlightRenderer:
 
         radius_px = abs(cy - north_pixel[1])
 
-        # Draw dashed circle (dots every 3 degrees)
         for angle_deg in range(0, 360, 3):
             angle = math.radians(angle_deg)
             x = cx + radius_px * math.cos(angle)
             y = cy + radius_px * math.sin(angle)
             draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=(100, 100, 100))
 
-        # Small center dot
-        draw.ellipse((cx - 2, cy - 2, cx + 2, cy + 2), fill=BLACK)
+        draw.ellipse((cx - 2, cy - 2, cx + 2, cy + 2), fill=RGB_BLACK)
 
-    def _draw_compass_rose(self, draw: ImageDraw.ImageDraw) -> None:
-        """Draw a small compass rose in the top-right corner."""
-        cx, cy = self._size[0] - 35, 35
-        length = 18
+    # === Palette-mode drawing methods (pixel-perfect text, no dithering) ===
 
-        # N-S line
-        draw.line([(cx, cy - length), (cx, cy + length)], fill=BLACK, width=1)
-        # E-W line
-        draw.line([(cx - length, cy), (cx + length, cy)], fill=BLACK, width=1)
-
-        # N arrow tip
-        draw.polygon(
-            [(cx, cy - length - 4), (cx - 3, cy - length + 3), (cx + 3, cy - length + 3)],
-            fill=BLACK,
-        )
-
-        # "N" label
-        draw.text((cx - 4, cy - length - 16), "N", fill=BLACK, font=self._font_tiny)
-
-    def _draw_legend(self, draw: ImageDraw.ImageDraw) -> None:
-        """Draw altitude color legend in the bottom-left corner."""
-        x_start = 8
-        y_start = self._size[1] - 100
-        box_size = 8
-        spacing = 14
-
-        items = [
-            (RED, "<5k ft"),
-            (ORANGE, "5-15k"),
-            (YELLOW, "15-30k"),
-            (BLUE, ">30k ft"),
-        ]
-
-        # Background
-        draw.rounded_rectangle(
-            (x_start - 4, y_start - 4, x_start + 70, y_start + len(items) * spacing + 2),
-            radius=4,
-            fill=(255, 255, 255, 200),
-        )
-
-        for i, (color, label) in enumerate(items):
-            y = y_start + i * spacing
-            draw.rectangle((x_start, y, x_start + box_size, y + box_size), fill=color, outline=BLACK)
-            draw.text((x_start + box_size + 4, y - 2), label, fill=BLACK, font=self._font_tiny)
-
-    def _draw_info_bar(self, draw: ImageDraw.ImageDraw, flight_count: int) -> None:
-        """Draw the info bar at the bottom of the frame."""
+    def _draw_info_bar_p(self, draw: ImageDraw.ImageDraw, flight_count: int) -> None:
         bar_height = 24
         y = self._size[1] - bar_height
         w = self._size[0]
 
-        # Semi-transparent white bar
-        draw.rectangle((0, y, w, self._size[1]), fill=(255, 255, 255))
-        draw.line([(0, y), (w, y)], fill=(180, 180, 180), width=1)
+        draw.rectangle((0, y, w, self._size[1]), fill=PAL_WHITE)
+        draw.line([(0, y), (w, y)], fill=PAL_BLACK, width=1)
 
-        # Left: title
-        draw.text((8, y + 5), "Just Plane Mosher", fill=BLACK, font=self._font_title)
+        draw.text((8, y + 4), "Just Plane Mosher", fill=PAL_BLACK, font=self._font_title)
 
-        # Center: flight count
         count_text = f"{flight_count} flight{'s' if flight_count != 1 else ''} overhead"
         bbox = draw.textbbox((0, 0), count_text, font=self._font_info)
         text_w = bbox[2] - bbox[0]
-        draw.text(((w - text_w) // 2, y + 5), count_text, fill=BLACK, font=self._font_info)
+        draw.text(((w - text_w) // 2, y + 4), count_text, fill=PAL_BLACK, font=self._font_info)
 
-        # Right: timestamp
         now = datetime.now().strftime("%H:%M")
         bbox = draw.textbbox((0, 0), now, font=self._font_info)
         time_w = bbox[2] - bbox[0]
-        draw.text((w - time_w - 8, y + 5), now, fill=BLACK, font=self._font_info)
+        draw.text((w - time_w - 8, y + 4), now, fill=PAL_BLACK, font=self._font_info)
+
+    def _draw_compass_rose_p(self, draw: ImageDraw.ImageDraw) -> None:
+        cx, cy = self._size[0] - 35, 35
+        length = 18
+
+        draw.line([(cx, cy - length), (cx, cy + length)], fill=PAL_BLACK, width=2)
+        draw.line([(cx - length, cy), (cx + length, cy)], fill=PAL_BLACK, width=2)
+
+        draw.polygon(
+            [(cx, cy - length - 5), (cx - 4, cy - length + 3), (cx + 4, cy - length + 3)],
+            fill=PAL_BLACK,
+        )
+
+        draw.text((cx - 5, cy - length - 18), "N", fill=PAL_BLACK, font=self._font_tiny)
+
+    def _draw_legend_p(self, draw: ImageDraw.ImageDraw) -> None:
+        x_start = 8
+        y_start = self._size[1] - 100
+        box_size = 10
+        spacing = 16
+
+        items = [
+            (PAL_RED, "<5k ft"),
+            (PAL_ORANGE, "5-15k"),
+            (PAL_YELLOW, "15-30k"),
+            (PAL_BLUE, ">30k ft"),
+        ]
+
+        draw.rectangle(
+            (x_start - 4, y_start - 4, x_start + 80, y_start + len(items) * spacing + 4),
+            fill=PAL_WHITE,
+        )
+
+        for i, (color, label) in enumerate(items):
+            y = y_start + i * spacing
+            draw.rectangle(
+                (x_start, y, x_start + box_size, y + box_size),
+                fill=color, outline=PAL_BLACK,
+            )
+            draw.text((x_start + box_size + 5, y - 2), label, fill=PAL_BLACK, font=self._font_tiny)
 
     def _quantize(self, image: Image.Image) -> Image.Image:
         """Quantize an RGB image to the 7-color e-ink palette with dithering."""
-        # Boost saturation and contrast for e-ink vibrancy
         image = ImageEnhance.Color(image).enhance(1.5)
         image = ImageEnhance.Contrast(image).enhance(1.1)
 
-        # Build palette image
         palette_data = []
         for r, g, b in PALETTE_RGB:
             palette_data.extend([r, g, b])
-        # Pad to 256 entries
         palette_data.extend([0, 0, 0] * (256 - len(PALETTE_RGB)))
 
         palette_img = Image.new("P", (1, 1))
         palette_img.putpalette(palette_data)
 
-        # Quantize with Floyd-Steinberg dithering
         return image.convert("RGB").quantize(palette=palette_img, dither=Image.Dither.FLOYDSTEINBERG)
 
 
 def _boxes_overlap(a: tuple, b: tuple) -> bool:
-    """Check if two (x1, y1, x2, y2) bounding boxes overlap."""
     return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
