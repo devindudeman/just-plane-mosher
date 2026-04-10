@@ -160,14 +160,16 @@ class FlightRenderer:
             px, py = pixel
             color = _altitude_color_rgb(ac.altitude_ft)
 
-            # Draw arrow on RGB canvas (survives dithering as a colored blob)
+            # Draw arrow on RGB canvas with thick black border
             if ac.track_deg is not None:
                 points = _arrow_points(px, py, ac.track_deg, size=17)
-                shadow = [(x + 1, y + 1) for x, y in points]
-                draw.polygon(shadow, fill=RGB_BLACK)
-                draw.polygon(points, fill=color, outline=RGB_BLACK, width=2)
+                # Black shadow/border: draw a larger arrow behind
+                border_points = _arrow_points(px, py, ac.track_deg, size=20)
+                draw.polygon(border_points, fill=RGB_BLACK)
+                draw.polygon(points, fill=color)
             else:
-                draw.ellipse((px - 7, py - 7, px + 7, py + 7), fill=color, outline=RGB_BLACK, width=2)
+                draw.ellipse((px - 9, py - 9, px + 9, py + 9), fill=RGB_BLACK)
+                draw.ellipse((px - 7, py - 7, px + 7, py + 7), fill=color)
 
             # Collect label info (text drawn AFTER quantization)
             label = self._compute_label(draw, flight, px, py, label_boxes)
@@ -182,11 +184,11 @@ class FlightRenderer:
 
         # Flight labels
         for label in labels:
-            pad = 3
+            pad = 4
             draw_p.rectangle(
                 (label.x - pad, label.y - pad,
                  label.x + label.text_w + pad, label.y + label.total_h + pad),
-                fill=PAL_WHITE,
+                fill=PAL_WHITE, outline=PAL_BLACK, width=1,
             )
             draw_p.text((label.x, label.y), label.line1, fill=PAL_BLACK, font=self._font_label)
             if label.line2:
