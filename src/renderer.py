@@ -162,12 +162,12 @@ class FlightRenderer:
 
             # Draw arrow on RGB canvas (survives dithering as a colored blob)
             if ac.track_deg is not None:
-                points = _arrow_points(px, py, ac.track_deg, size=14)
+                points = _arrow_points(px, py, ac.track_deg, size=17)
                 shadow = [(x + 1, y + 1) for x, y in points]
                 draw.polygon(shadow, fill=RGB_BLACK)
                 draw.polygon(points, fill=color, outline=RGB_BLACK, width=2)
             else:
-                draw.ellipse((px - 6, py - 6, px + 6, py + 6), fill=color, outline=RGB_BLACK, width=2)
+                draw.ellipse((px - 7, py - 7, px + 7, py + 7), fill=color, outline=RGB_BLACK, width=2)
 
             # Collect label info (text drawn AFTER quantization)
             label = self._compute_label(draw, flight, px, py, label_boxes)
@@ -312,9 +312,9 @@ class FlightRenderer:
 
     def _draw_legend_p(self, draw: ImageDraw.ImageDraw) -> None:
         x_start = 8
-        y_start = self._size[1] - 100
-        box_size = 10
-        spacing = 16
+        y_start = self._size[1] - 120
+        box_size = 12
+        spacing = 19
 
         items = [
             (PAL_RED, "<5k ft"),
@@ -324,7 +324,7 @@ class FlightRenderer:
         ]
 
         draw.rectangle(
-            (x_start - 4, y_start - 4, x_start + 80, y_start + len(items) * spacing + 4),
+            (x_start - 5, y_start - 5, x_start + 90, y_start + len(items) * spacing + 5),
             fill=PAL_WHITE,
         )
 
@@ -334,7 +334,7 @@ class FlightRenderer:
                 (x_start, y, x_start + box_size, y + box_size),
                 fill=color, outline=PAL_BLACK,
             )
-            draw.text((x_start + box_size + 5, y - 2), label, fill=PAL_BLACK, font=self._font_tiny)
+            draw.text((x_start + box_size + 6, y - 2), label, fill=PAL_BLACK, font=self._font_info)
 
     def _quantize(self, image: Image.Image) -> Image.Image:
         """Quantize an RGB image to the 7-color e-ink palette with dithering."""
