@@ -137,16 +137,17 @@ class FlightRenderer:
         """Render the complete flight tracker frame.
 
         Two-layer approach:
-        1. Draw map + aircraft arrows on RGB canvas, then dither to 7 colors
-        2. Draw all text/UI on the palette image with exact palette indices (no dithering)
+        1. Draw map on RGB canvas, then dither to 7 colors
+        2. Draw aircraft, labels, and UI on the palette image with exact palette indices (no dithering)
         """
-        # === Layer 1: RGB map + aircraft arrows (will be dithered) ===
+        # === Layer 1: RGB map only (will be dithered) ===
         frame = self._base_map.copy()
         draw = ImageDraw.Draw(frame)
 
         self._draw_range_ring(draw)
 
-        # Draw aircraft arrows and collect label positions
+        # Collect flight positions and label info (nothing drawn yet)
+        flight_draws: list[tuple[int, int, int, float | None]] = []  # px, py, pal_color, heading
         labels: list[_LabelInfo] = []
         label_boxes: list[tuple[int, int, int, int]] = []
         visible_count = 0
@@ -159,29 +160,31 @@ class FlightRenderer:
 
             visible_count += 1
             px, py = pixel
-            color = _altitude_color_rgb(ac.altitude_ft)
+            pal_color = _altitude_color_pal(ac.altitude_ft)
+            flight_draws.append((px, py, pal_color, ac.track_deg))
 
-            # Draw arrow on RGB canvas with thick black border
-            if ac.track_deg is not None:
-                points = _arrow_points(px, py, ac.track_deg, size=17)
-                # Black shadow/border: draw a larger arrow behind
-                border_points = _arrow_points(px, py, ac.track_deg, size=20)
-                draw.polygon(border_points, fill=RGB_BLACK)
-                draw.polygon(points, fill=color)
-            else:
-                draw.ellipse((px - 9, py - 9, px + 9, py + 9), fill=RGB_BLACK)
-                draw.ellipse((px - 7, py - 7, px + 7, py + 7), fill=color)
-
-            # Collect label info (text drawn AFTER quantization)
             label = self._compute_label(draw, flight, px, py, label_boxes)
             if label:
                 labels.append(label)
 
-        # === Quantize the map layer ===
+        # === Quantize the map layer (no aircraft on it) ===
         quantized = self._quantize(frame)
 
-        # === Layer 2: Draw crisp text on the palette image ===
+        # === Layer 2: Draw everything crisp on the palette image ===
         draw_p = ImageDraw.Draw(quantized)
+
+        # Aircraft arrows — pixel-perfect with black borders
+        for px, py, pal_color, heading in flight_draws:
+            if heading is not None:
+                # Black border arrow (larger)
+                border_points = _arrow_points(px, py, heading, size=20)
+                draw_p.polygon(border_points, fill=PAL_BLACK)
+                # Colored arrow on top
+                points = _arrow_points(px, py, heading, size=16)
+                draw_p.polygon(points, fill=pal_color)
+            else:
+                draw_p.ellipse((px - 9, py - 9, px + 9, py + 9), fill=PAL_BLACK)
+                draw_p.ellipse((px - 7, py - 7, px + 7, py + 7), fill=pal_color)
 
         # Flight labels
         for label in labels:
