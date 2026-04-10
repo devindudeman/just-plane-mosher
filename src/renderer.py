@@ -258,7 +258,7 @@ class FlightRenderer:
     def _draw_legend(self, draw: ImageDraw.ImageDraw) -> None:
         """Draw altitude color legend in the bottom-left corner."""
         x_start = 8
-        y_start = self._size[1] - 65
+        y_start = self._size[1] - 100
         box_size = 8
         spacing = 14
 
