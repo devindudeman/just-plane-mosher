@@ -200,7 +200,6 @@ class FlightRenderer:
 
         # UI elements
         self._draw_info_bar_p(draw_p, visible_count)
-        self._draw_compass_rose_p(draw_p)
         self._draw_legend_p(draw_p)
 
         return quantized
